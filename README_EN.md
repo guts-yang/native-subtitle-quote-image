@@ -187,6 +187,12 @@ The agent checks the source, subtitle type, and candidate frames, locks the mode
 
 You can also run the scripts without an agent. Replace `VIDEO` with your video path.
 
+**Check the source**: after download, verify resolution and decode the first 10 seconds so broken or low-res sources fail before frame extraction (without `--min-height`, below 720p only warns).
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py check-source VIDEO --min-height 720
+```
+
 **Pick frames**: build a timestamped candidate sheet instead of guessing timestamps.
 
 ```bash
@@ -218,6 +224,24 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 ```bash
 python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
   --script script.json --out output.jpg --aspect 3:4 --width 1440
+```
+
+**Optional six-line card**: put six reviewed lines with strictly increasing timestamps in `script.json`. At 1080×1440, this preset uses an 870px hero and five contiguous 114px strips, with equal spacing between all six line centers. The existing scripted layout remains the default.
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
+  --script script.json --out six-line.jpg --six-line-card --aspect 3:4 --width 1080
+```
+
+`--six-line-card` applies only to post-produced scripted subtitles and cannot be combined with `--layout natural` or `--hero-fraction`. The strip sampling center defaults to 60% of source-frame height and can be changed with `--band-center`. Review every source line and rendered image.
+
+**Fixed-camera sources and `--hero-zoom`**: prefer multi-camera videos with varied shot sizes; fixed single-camera footage (lectures, online-course recordings) is high risk because the six hero images look almost identical. `render` and `render-script` accept an optional `--hero-zoom 1.0,0.9,0.95`: comma-separated per-card hero zoom factors in the range 0.8–1.0, cycled per card, off by default (output unchanged when omitted). It only crops away more of the hero frame and scales it back up; subtitle strips, text, strip spacing and the `--six-line-card` geometry stay the same, and in native mode the crop window never enters the subtitle strip. Because this is crop-and-upscale, a low-resolution source makes the hero blurrier; it is not a real sharpness improvement. `render-script` produces one image and uses the first factor.
+
+**Optional speaker prefix**: for Q&A or conversation cards in script mode, add `"speaker": "Host"` to each line in `script.json` and pass `--speaker-prefix on-change` to draw a prefix such as `Host:` only when the speaker changes. `every` draws it on every line; `none` (default) draws nothing. The prefix is smaller than the line and uses an accent color, and it never makes the line text shrink when the line fits. Keep the speaker in the `speaker` field, not inside `text`.
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
+  --script script.json --out qa.jpg --speaker-prefix on-change
 ```
 
 **Preserve source proportions and the wide composition (v2.2.0)**: both subtitle modes support `--layout natural`. Without `--width`, the source width is retained and the height follows the stacked content instead of a forced 3:4 canvas. An explicit width uses proportional scaling only.
@@ -267,6 +291,8 @@ Defaults worth knowing:
 - Native one-line subtitles are previewed from the `0.78–0.96` band of the source height.
 - Each image takes at most 7 timestamps (1 hero + 6 strips) in both modes; split longer passages into several images.
 - Existing images are never overwritten unless you pass `--overwrite`.
+- If the system temp directory is not writable (sandbox, corporate policy), pass `--tmp-dir <writable-dir>` (or set the `NSQI_TMP_DIR` environment variable; the flag wins) to choose where frame-extraction temp files go. Without it the system temp directory is used; a missing or unwritable directory fails with a clear error.
+- Batch `render` stops at the first failure by default. With `--keep-going`, one failed card no longer blocks the rest: a failure list (card number, timestamps, reason) is printed and written to `渲染失败报告.json` in the output directory, and the exit code is non-zero. After fixing, `--resume` renders only the missing or corrupt cards; valid cards are kept even if the manifest changed, while the contact sheet and timestamp file are regenerated.
 - Before rendering, both modes check for duplicate frames. If every timestamp yields nearly the same picture (for example, the source is a static cover image) or, in native mode, two adjacent subtitle strips are nearly identical, the command stops without writing images. Pass `--allow-duplicate-frames` once you have confirmed it is intended.
 - Run `--help` for all options.
 
@@ -298,6 +324,24 @@ Many videos carry subtitles as a switchable player track (CC). The downloaded fr
 - Interview or podcast clips with hard-coded subtitles on video platforms. These are often re-uploads, so confirm usage rights before publishing.
 
 **Still nothing?** Switch to script mode. Use the video's subtitle track or a Whisper transcript to locate timestamps, write reviewed copy into `script.json`, and run `render-script`. The output is labeled as added subtitles and never passes as the original.
+
+</details>
+
+<details>
+<summary><strong>Interviews and other multi-speaker videos</strong></summary>
+
+<br>
+
+The collage simply follows timestamp order and does not know who is speaking. Subtitle strips only show the bottom of each frame, so readers assume every line belongs to the person in the hero frame. YouTube subtitle tracks and plain Whisper transcripts carry no speaker labels either. Picking "a few consecutive lines" from a multi-speaker video therefore tends to splice the host's questions into the guest's answers, which reads as jumbled and misattributed.
+
+The Skill now handles this as follows:
+
+- It labels speakers in the transcript before picking lines, checks unclear lines against the frames, and drops lines it still can't attribute.
+- By default one image holds one speaker's lines, and the hero frame shows that speaker talking.
+- For a question-and-answer layout it asks you first, and the question and answer must be adjacent in the source. Native mode can't add speaker labels to the frames, so the delivery notes name the speaker of every line. Script mode can label speakers on the image with `--speaker-prefix` (see below).
+- YouTube auto-captions roll, so the same line repeats and starts early. They are deduplicated before timestamps are chosen.
+
+You can say it up front: "This is a two-person interview; use only consecutive lines from the guest."
 
 </details>
 
@@ -415,6 +459,8 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 
 GitHub Actions runs these checks on Python 3.10 and 3.13 for every push and pull request.
 
+On systems whose default encoding is not UTF-8 (for example GBK on Simplified Chinese Windows), set `PYTHONUTF8=1` first (PowerShell: `$env:PYTHONUTF8=1`; cmd: `set PYTHONUTF8=1`). `check_environment.py` prints a hint when it detects a non-UTF-8 default encoding.
+
 </details>
 
 **In-depth guides** (Chinese; the commands are language-independent)
@@ -422,6 +468,7 @@ GitHub Actions runs these checks on Python 3.10 and 3.13 for every push and pull
 - [URL acquisition, yt-dlp, Deno/Node, and timelines](skills/native-subtitle-quote-image/references/yt-dlp-and-transcripts.md)
 - [End-to-end topic selection, frame calibration, rendering, and QA](skills/native-subtitle-quote-image/references/end-to-end-workflow.md)
 - [Compact hero, subtitle-strip density, and visual QA rules](skills/native-subtitle-quote-image/references/visual-style.md)
+- [Troubleshooting: common errors and rendering problems](skills/native-subtitle-quote-image/references/troubleshooting.md) (Chinese)
 
 ## Feedback and contributing
 

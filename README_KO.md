@@ -187,6 +187,12 @@ flowchart LR
 
 Agent 없이 스크립트를 직접 실행할 수도 있습니다. `VIDEO`를 실제 영상 경로로 바꾸세요.
 
+**소스 점검**: 다운로드 후 해상도를 확인하고 처음 10초를 디코딩해, 손상되었거나 저해상도인 소스를 프레임 추출 전에 걸러냅니다(`--min-height`를 생략하면 720p 미만은 경고만 합니다).
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py check-source VIDEO --min-height 720
+```
+
 **후보 프레임 선택**: 타임스탬프가 있는 후보 프레임 시트를 만듭니다.
 
 ```bash
@@ -218,6 +224,24 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 ```bash
 python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
   --script script.json --out output.jpg --aspect 3:4 --width 1440
+```
+
+**선택형 6줄 카드**: `script.json`에 검토한 문구 6줄과 엄격히 증가하는 타임스탬프를 넣습니다. 1080×1440에서는 상단 주 화면 870px와 빈틈없이 이어지는 114px 자막 띠 5개를 사용하며, 여섯 줄의 중심 간격이 같습니다. 기존 스크립트 레이아웃은 기본값으로 유지됩니다.
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
+  --script script.json --out six-line.jpg --six-line-card --aspect 3:4 --width 1080
+```
+
+`--six-line-card`는 후편집 스크립트 자막에만 적용되며 `--layout natural` 또는 `--hero-fraction`과 함께 사용할 수 없습니다. 자막 띠는 기본적으로 원본 프레임 높이의 60% 지점에서 추출하며 `--band-center`로 조정할 수 있습니다. 각 문구의 출처와 완성 이미지를 확인하세요.
+
+**고정 카메라 원본과 `--hero-zoom`**: 멀티 카메라이고 화면 크기 변화가 있는 영상을 우선 고르세요. 고정 단일 카메라 영상(강의, 온라인 수업 녹화)은 위험도가 높아 여섯 장의 주 이미지가 거의 같아 보입니다. `render`와 `render-script`는 선택 옵션 `--hero-zoom 1.0,0.9,0.95`를 지원합니다. 카드별 주 이미지 확대 계수를 쉼표로 구분하며 범위는 0.8–1.0, 카드 순서대로 순환하고 기본값은 꺼짐(생략하면 출력 불변)입니다. 주 이미지를 더 많이 잘라낸 뒤 다시 키울 뿐이며 자막 띠, 텍스트, 띠 간격, `--six-line-card` 기하는 바뀌지 않고 원본 모드에서는 잘라내는 영역이 자막 띠로 들어가지 않습니다. 잘라낸 뒤 키우는 방식이므로 원본 해상도가 낮으면 주 이미지가 더 흐려지며 실제 선명도 향상이 아닙니다. `render-script`는 한 장만 만들며 첫 번째 계수를 사용합니다.
+
+**선택: 화자 접두어**: 스크립트 모드의 질의응답·대담 이미지에서 `script.json`의 각 문장에 `"speaker": "진행자"`를 넣고 `--speaker-prefix on-change`를 쓰면 화자가 바뀔 때만 `진행자:` 같은 접두어를 그립니다. `every`는 모든 문장에, `none`(기본값)은 그리지 않습니다. 접두어는 문장보다 작고 강조색을 쓰며, 문장이 들어가는 경우 접두어 때문에 문장 글자가 작아지지 않습니다. 화자는 `text`가 아니라 `speaker` 필드에 적습니다.
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
+  --script script.json --out qa.jpg --speaker-prefix on-change
 ```
 
 **원본 비율과 가로 구도 유지(v2.2.0)**: 두 모드 모두 `--layout natural`을 지원합니다. `--width`를 생략하면 원본 너비를 유지하며 높이는 실제 내용에 따라 결정됩니다. 너비를 지정해도 같은 비율로 확대·축소합니다.
@@ -267,6 +291,8 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 - 원본 한 줄 자막은 영상 높이의 `0.78–0.96` 영역부터 확인합니다.
 - 이미지 한 장에는 타임스탬프를 최대 7개(주 이미지 1개 + 자막 띠 6개)까지 씁니다. 더 긴 내용은 여러 장으로 나눕니다.
 - 기존 파일은 `--overwrite`를 지정해야 덮어씁니다.
+- 시스템 임시 폴더에 쓸 수 없는 환경(샌드박스, 기업 정책)에서는 `--tmp-dir <쓰기 가능한 폴더>`(또는 환경 변수 `NSQI_TMP_DIR`, 옵션이 우선)로 프레임 추출 임시 파일 위치를 지정합니다. 지정하지 않으면 시스템 임시 폴더를 쓰며, 폴더가 없거나 쓸 수 없으면 명확한 오류를 냅니다.
+- 일괄 `render`는 기본적으로 첫 실패에서 중단됩니다. `--keep-going`을 쓰면 한 장이 실패해도 나머지를 계속 렌더링하고, 실패 목록(몇 번째 카드, 시간점, 원인)을 출력하며 출력 폴더의 `渲染失败报告.json`에 기록합니다. 종료 코드는 0이 아닙니다. 수정 후 `--resume`을 쓰면 누락되었거나 손상된 카드만 다시 렌더링합니다. 정상 카드는 manifest가 바뀌어도 다시 렌더링하지 않으며, 총괄 이미지와 시간점 파일은 새로 생성됩니다.
 - 렌더링 전에 중복 화면을 검사합니다. 모든 타임스탬프의 화면이 거의 같거나(예: 원본 영상이 정지된 표지 이미지뿐인 경우), 원본 자막 모드에서 이웃한 자막 띠 두 개가 거의 같으면 이미지를 만들지 않고 중단합니다. 의도한 결과라면 `--allow-duplicate-frames`를 추가하세요.
 - 전체 옵션은 `--help`로 확인합니다.
 
@@ -294,6 +320,24 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 **찾기 쉬운 자료**: 직접 편집해 자막을 영상에 새긴 파일, 제작자가 자막을 넣은 인터뷰·발표 영상 등입니다. 다른 사람이 재게시한 클립은 사용 권한을 확인해야 합니다.
 
 **대안**: 스크립트 모드로 전환하세요. 자막 트랙이나 Whisper 전사문으로 타임스탬프를 찾고, 검토한 문구를 `script.json`에 넣어 `render-script`로 만듭니다. 결과물은 후편집 자막으로 표시됩니다.
+
+</details>
+
+<details>
+<summary><strong>인터뷰·대담처럼 여러 사람이 말하는 영상</strong></summary>
+
+<br>
+
+이미지는 타임스탬프 순서대로만 이어 붙이며, 누가 말하는지는 알지 못합니다. 자막 띠는 화면 아래쪽만 잘라 쓰기 때문에, 보는 사람은 모든 문장을 메인 화면 속 인물의 말로 받아들입니다. YouTube 자막 트랙과 일반 Whisper 전사본에도 화자 정보가 없습니다. 그래서 여러 사람이 나오는 영상에서 "이어지는 몇 문장"을 그대로 고르면 진행자의 질문과 게스트의 답이 섞여, 누가 한 말인지 알 수 없고 순서도 어긋나 보입니다.
+
+이제 Skill은 다음과 같이 처리합니다.
+
+- 문장을 고르기 전에 전사본에 화자를 표시하고, 애매한 문장은 화면으로 다시 확인하며, 그래도 확인되지 않으면 쓰지 않습니다.
+- 기본적으로 이미지 한 장에는 한 사람의 말만 담고, 메인 화면도 그 사람이 말하는 장면으로 고릅니다.
+- "질문과 답" 구성을 원하면 먼저 확인하며, 질문과 답은 원본에서 바로 이어져야 합니다. 원본 자막 모드는 화면에 화자를 덧붙일 수 없으므로, 전달할 때 문장마다 화자를 적어 둡니다. 스크립트 모드에서는 `--speaker-prefix`로 화면에 화자를 표시할 수 있습니다(아래 참고).
+- YouTube 자동 자막은 롤링 방식이라 같은 문장이 반복되고 시작 시간이 이릅니다. 먼저 중복을 정리한 뒤 시간점을 정합니다.
+
+요청할 때 "2인 인터뷰이니 게스트가 이어서 한 말만 골라 줘"처럼 미리 알려 주면 됩니다.
 
 </details>
 
@@ -408,6 +452,8 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 
 GitHub Actions가 push와 pull request마다 Python 3.10과 3.13에서 검증합니다.
 
+기본 인코딩이 UTF-8이 아닌 시스템(예: 중국어 간체 Windows의 GBK)에서는 먼저 `PYTHONUTF8=1`을 설정하세요(PowerShell: `$env:PYTHONUTF8=1`, cmd: `set PYTHONUTF8=1`). `check_environment.py`는 UTF-8이 아닌 기본 인코딩을 감지하면 안내를 출력합니다.
+
 </details>
 
 **상세 참고 문서**: 아래 문서는 중국어로 작성되어 있으며 명령어는 언어와 관계없이 같습니다.
@@ -415,6 +461,7 @@ GitHub Actions가 push와 pull request마다 Python 3.10과 3.13에서 검증합
 - [영상 링크, yt-dlp, Deno/Node, 타임라인](skills/native-subtitle-quote-image/references/yt-dlp-and-transcripts.md)
 - [주제 선택, 프레임 확인, 렌더링과 검수](skills/native-subtitle-quote-image/references/end-to-end-workflow.md)
 - [주 이미지와 자막 띠의 시각 구성](skills/native-subtitle-quote-image/references/visual-style.md)
+- [문제 해결: 자주 나오는 오류와 출력 문제](skills/native-subtitle-quote-image/references/troubleshooting.md)(중국어)
 
 ## 피드백과 기여
 

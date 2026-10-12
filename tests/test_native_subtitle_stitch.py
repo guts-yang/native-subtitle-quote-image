@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,9 @@ from unittest import mock
 
 from PIL import Image, ImageDraw, ImageOps
 
+
+# 子进程继承 UTF-8 模式，避免 GBK 等默认编码下输出与解码不一致。
+os.environ.setdefault("PYTHONUTF8", "1")
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (
@@ -152,7 +156,7 @@ class HelperTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(ENV_SCRIPT), "--json"],
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",
             check=True,
         )
         payload = json.loads(proc.stdout)
@@ -167,7 +171,7 @@ class HelperTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(ENV_SCRIPT), "--url-mode"],
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",
             check=False,
         )
         self.assertIn("不要退回本地模式", proc.stdout)
@@ -230,7 +234,7 @@ class HelperTests(unittest.TestCase):
                 "/tmp/unused-native-subtitle-output",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",
         )
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("视频不存在或不是文件", proc.stderr)
@@ -346,7 +350,7 @@ class NaturalGeometryTests(unittest.TestCase):
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPT), "render-script", "unused.mp4",
                      "--script", "unused.json", "--out", "unused.jpg", *options],
-                    capture_output=True, text=True,
+                    capture_output=True, encoding="utf-8", errors="replace",
                 )
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn(message, proc.stderr)
@@ -363,11 +367,104 @@ class NaturalGeometryTests(unittest.TestCase):
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPT), "render", "unused.mp4",
                      "--manifest", "unused.json", "--out-dir", "unused", *options],
-                    capture_output=True, text=True,
+                    capture_output=True, encoding="utf-8", errors="replace",
                 )
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn(message, proc.stderr)
                 self.assertNotIn("Traceback", proc.stderr)
+
+
+class SixLineCardTests(unittest.TestCase):
+    def test_geometry_and_rendered_strips(self):
+        self.assertEqual(MODULE.six_line_geometry(1080, 1440), (870, 114, 870 / 1440))
+        colors = [(30 + i * 25, 50 + i * 20, 70 + i * 15) for i in range(6)]
+        frames = [Image.new("RGB", (1080, 870), color) for color in colors]
+        lines = [{"t": i, "text": f"Line {i}"} for i in range(6)]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            MODULE, "grab_frame", side_effect=frames
+        ), mock.patch.object(MODULE, "draw_scripted_subtitle") as draw_text:
+            out = Path(tmp) / "six-line.jpg"
+            MODULE.scripted_render_one(
+                "unused", lines, out, (3, 4), 1080, 0.60, None, None, None,
+                six_line_card=True,
+            )
+            calls = draw_text.call_args_list
+            self.assertEqual(len(calls), 6)
+            self.assertEqual(calls[0].args[0].size, (1080, 870))
+            self.assertTrue(all(call.args[0].size == (1080, 114) for call in calls[1:]))
+            centers = [calls[0].args[2]] + [
+                870 + i * 114 + call.args[2]
+                for i, call in enumerate(calls[1:])
+            ]
+            self.assertEqual(centers, [813, 927, 1041, 1155, 1269, 1383])
+            self.assertTrue(all(call.args[4] == 63 for call in calls))
+            with Image.open(out) as rendered:
+                self.assertEqual(rendered.size, (1080, 1440))
+                # Distinct solid-color frames fill every row, including each seam.
+                for i, y in enumerate((869, 870, 983, 984, 1097, 1098, 1211, 1212, 1325, 1326, 1439)):
+                    expected = colors[0 if y < 870 else 1 + (y - 870) // 114]
+                    actual = rendered.getpixel((540, y))
+                    self.assertTrue(all(abs(a - e) <= 8 for a, e in zip(actual, expected)),
+                                    (i, y, actual, expected))
+
+    def test_invalid_cli_combinations_fail_before_video_io(self):
+        for options, message in [
+            (["--layout", "natural"], "只支持固定 3:4"),
+            (["--hero-fraction", "0.6"], "不接受 --hero-fraction"),
+            (["--aspect", "16:9"], "只支持固定 3:4"),
+        ]:
+            with self.subTest(options=options):
+                proc = subprocess.run(
+                    [sys.executable, str(SCRIPT), "render-script", "unused.mp4",
+                     "--script", "unused.json", "--out", "unused.jpg",
+                     "--six-line-card", *options],
+                    capture_output=True, encoding="utf-8", errors="replace",
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(message, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+
+    def test_requires_exactly_six_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "unused.mp4"
+            video.touch()
+            script = Path(tmp) / "five.json"
+            script.write_text(json.dumps({"lines": [
+                {"t": i, "text": f"Line {i}"} for i in range(5)
+            ]}), encoding="utf-8")
+            args = mock.Mock(
+                video=str(video), script=str(script), six_line_card=True,
+                speaker_prefix="none",
+            )
+            with mock.patch.object(MODULE, "video_metadata", return_value=(1080, 870, 10)):
+                with self.assertRaisesRegex(SystemExit, "恰好 6 句"):
+                    MODULE.command_render_script(args)
+
+    def test_long_line_shrinks_before_reaching_safe_width(self):
+        class MeasuredDraw:
+            rendered = None
+
+            def textbbox(self, position, text, font, stroke_width):
+                return (0, 0, round(len(text) * font * 0.62) + 2 * stroke_width, font)
+
+            def text(self, position, text, font, **kwargs):
+                self.rendered = (position, text, font, kwargs)
+
+        measured = MeasuredDraw()
+        image = Image.new("RGB", (1080, 114), "white")
+        with mock.patch.object(MODULE.ImageDraw, "Draw", return_value=measured), mock.patch.object(
+            MODULE, "load_subtitle_font", side_effect=lambda path, size, text: size
+        ):
+            MODULE.draw_scripted_subtitle(image, "M" * 28, 57, None, 63, round(1080 * 0.92))
+        position, text, chosen_size, kwargs = measured.rendered
+        stroke = kwargs["stroke_width"]
+        width = measured.textbbox((0, 0), text, chosen_size, stroke)[2]
+        self.assertLess(chosen_size, 63)
+        self.assertLessEqual(width, round(1080 * 0.92))
+        self.assertGreaterEqual(position[0], 0)
+        self.assertLessEqual(position[0] + width, image.width)
+        self.assertGreaterEqual(position[1], 0)
+        self.assertLessEqual(position[1] + chosen_size, image.height)
 
 
 def subtitle_band(width, height, left, right, background="#5a5a5a"):
@@ -378,6 +475,89 @@ def subtitle_band(width, height, left, right, background="#5a5a5a"):
         draw.rectangle((x, height * 0.3, x + 3, height * 0.7), fill="white",
                        outline="black", width=1)
     return band
+
+
+class SpeakerPrefixTests(unittest.TestCase):
+    LINES = {"lines": [
+        {"t": 1, "text": "Question one", "speaker": "Host"},
+        {"t": 2, "text": "Question two", "speaker": "Host"},
+        {"t": 3, "text": "Answer one", "speaker": "Guest"},
+        {"t": 4, "text": "Answer two", "speaker": "Guest"},
+        {"t": 5, "text": "Back to you", "speaker": "Host"},
+    ]}
+
+    def prefixes(self, mode):
+        lines = MODULE.normalize_script_lines(self.LINES, 10, mode)
+        return [line["prefix"] for line in MODULE.apply_speaker_prefix(lines, mode)]
+
+    def test_modes_choose_which_lines_show_prefix(self):
+        self.assertEqual(self.prefixes("none"), [None] * 5)
+        self.assertEqual(
+            self.prefixes("on-change"), ["Host", None, "Guest", None, "Host"]
+        )
+        self.assertEqual(
+            self.prefixes("every"), ["Host", "Host", "Guest", "Guest", "Host"]
+        )
+
+    def test_speaker_stays_out_of_text(self):
+        lines = MODULE.normalize_script_lines(self.LINES, 10, "every")
+        self.assertEqual(lines[0]["text"], "Question one")
+        self.assertEqual(lines[0]["speaker"], "Host")
+
+    def test_prefix_modes_require_speaker_on_every_line(self):
+        data = {"lines": [{"t": 1, "text": "a", "speaker": "Host"}, {"t": 2, "text": "b"}]}
+        self.assertEqual(len(MODULE.normalize_script_lines(data, 10, "none")), 2)
+        for mode in ("on-change", "every"):
+            with self.assertRaisesRegex(SystemExit, r"lines\[1\] 缺少 speaker"):
+                MODULE.normalize_script_lines(data, 10, mode)
+
+    def test_invalid_speaker_values_are_rejected(self):
+        for bad in ("", "  ", 3, "A\nB"):
+            data = {"lines": [{"t": 1, "text": "a", "speaker": bad}, {"t": 2, "text": "b"}]}
+            with self.assertRaises(SystemExit):
+                MODULE.normalize_script_lines(data, 10)
+
+    def test_label_separator_follows_script(self):
+        self.assertEqual(MODULE.speaker_label("主持人", "你好"), "主持人：")
+        self.assertEqual(MODULE.speaker_label("Host", "Hello"), "Host: ")
+
+    def test_prefix_is_drawn_in_accent_color_left_of_text(self):
+        plain = Image.new("RGB", (900, 120), "#404040")
+        prefixed = plain.copy()
+        MODULE.draw_scripted_subtitle(plain, "Hello world", 60, None, 48, 820)
+        MODULE.draw_scripted_subtitle(
+            prefixed, "Hello world", 60, None, 48, 820, speaker="Host"
+        )
+        accent = [
+            x for x in range(prefixed.width) for y in range(prefixed.height)
+            if prefixed.getpixel((x, y)) == MODULE.SPEAKER_PREFIX_FILL
+        ]
+        white = [
+            x for x in range(prefixed.width) for y in range(prefixed.height)
+            if prefixed.getpixel((x, y)) == (255, 255, 255)
+        ]
+        self.assertTrue(accent, "前缀应使用强调色")
+        self.assertLess(max(accent), min(white), "前缀应在台词左侧")
+        plain_white = [
+            x for x in range(plain.width) for y in range(plain.height)
+            if plain.getpixel((x, y)) == (255, 255, 255)
+        ]
+        # 放得下时，前缀不让台词缩小：白字宽度不变。
+        self.assertEqual(
+            max(white) - min(white), max(plain_white) - min(plain_white)
+        )
+
+    def test_prefixed_line_stays_inside_safe_width(self):
+        image = Image.new("RGB", (600, 100), "#404040")
+        MODULE.draw_scripted_subtitle(
+            image, "M" * 12, 50, None, 48, 552, speaker="Speaker"
+        )
+        lit = [
+            x for x in range(image.width) for y in range(image.height)
+            if image.getpixel((x, y)) != (64, 64, 64)
+        ]
+        self.assertGreaterEqual(min(lit), 0)
+        self.assertLessEqual(max(lit) - min(lit), 552)
 
 
 class SideCropTests(unittest.TestCase):
@@ -491,16 +671,86 @@ class DuplicateFrameTests(unittest.TestCase):
                 sys.executable, str(SCRIPT), "render", str(video),
                 "--manifest", str(manifest), "--out-dir", str(tmp_path / "out"),
             ]
-            blocked = subprocess.run(command, capture_output=True, text=True)
+            blocked = subprocess.run(command, capture_output=True, encoding="utf-8", errors="replace")
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("静态封面", blocked.stderr)
             self.assertFalse((tmp_path / "out" / "01_static.jpg").exists())
 
             allowed = subprocess.run(
-                [*command, "--allow-duplicate-frames"], capture_output=True, text=True
+                [*command, "--allow-duplicate-frames"], capture_output=True, encoding="utf-8", errors="replace"
             )
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
             self.assertTrue((tmp_path / "out" / "01_static.jpg").is_file())
+
+
+class CheckSourceTests(unittest.TestCase):
+    @staticmethod
+    def make_video(path, size, seconds=3):
+        subprocess.run(
+            [
+                MODULE.FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=10",
+                "-t", str(seconds), "-c:v", "mpeg4", "-pix_fmt", "yuv420p",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    @staticmethod
+    def check(video, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "check-source", str(video), *extra],
+            capture_output=True,
+            encoding="utf-8", errors="replace",
+        )
+
+    def test_clean_hd_source_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "hd.mkv"
+            self.make_video(video, "1280x720")
+            proc = self.check(video, "--min-height", "720")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("自检通过", proc.stdout)
+            self.assertNotIn("警告", proc.stderr)
+
+    def test_low_resolution_warns_without_failing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "low.mkv"
+            self.make_video(video, "640x360")
+            proc = self.check(video)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("警告", proc.stderr)
+
+    def test_min_height_fails_low_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "low.mkv"
+            self.make_video(video, "640x360")
+            proc = self.check(video, "--min-height", "720")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("低于 --min-height 720", proc.stderr)
+
+    def test_corrupt_stream_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "bad.mkv"
+            self.make_video(video, "1280x720")
+            data = bytearray(video.read_bytes())
+            start = len(data) // 3
+            for index in range(start, start + 4000):
+                data[index] = (data[index] * 7 + 13) % 256
+            video.write_bytes(bytes(data))
+            proc = self.check(video, "--seconds", "3")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("解码前 3 秒出现错误", proc.stderr)
+
+    def test_unreadable_file_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "junk.mp4"
+            video.write_bytes(b"not a video")
+            proc = self.check(video)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("源视频自检失败", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
 
 
 class CliIntegrationTests(unittest.TestCase):
@@ -549,7 +799,7 @@ class CliIntegrationTests(unittest.TestCase):
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
             )
             self.assertTrue(sample.is_file())
 
@@ -565,7 +815,7 @@ class CliIntegrationTests(unittest.TestCase):
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
             )
             self.assertTrue(default_sample.is_file())
 
@@ -587,7 +837,7 @@ class CliIntegrationTests(unittest.TestCase):
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
             )
             self.assertTrue(focused_sample.is_file())
 
@@ -605,7 +855,7 @@ class CliIntegrationTests(unittest.TestCase):
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
             )
             self.assertTrue(band.is_file())
 
@@ -633,7 +883,7 @@ class CliIntegrationTests(unittest.TestCase):
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
             )
             output = out_dir / "01_合成测试.jpg"
             self.assertTrue(output.is_file())
@@ -675,7 +925,7 @@ class CliIntegrationTests(unittest.TestCase):
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
             )
             with Image.open(scripted_output) as rendered:
                 self.assertEqual(rendered.size, (300, 400))
@@ -687,7 +937,7 @@ class CliIntegrationTests(unittest.TestCase):
             ]:
                 subprocess.run(
                     [sys.executable, str(SCRIPT), command, str(video), *inputs, "--layout", "natural"],
-                    check=True, capture_output=True, text=True,
+                    check=True, capture_output=True, encoding="utf-8", errors="replace",
                 )
                 natural_path = (tmp_path / "natural" / "01_合成测试.jpg" if command == "render"
                                 else tmp_path / "natural-script.jpg")
@@ -699,7 +949,7 @@ class CliIntegrationTests(unittest.TestCase):
                 [sys.executable, str(SCRIPT), "render", str(video),
                  "--manifest", str(manifest), "--out-dir", str(fixed_dir),
                  "--aspect", "3:4", "--width", "300"],
-                check=True, capture_output=True, text=True,
+                check=True, capture_output=True, encoding="utf-8", errors="replace",
             )
             with Image.open(fixed_dir / "01_合成测试.jpg") as rendered:
                 self.assertEqual(rendered.size, (300, 400))
@@ -718,10 +968,322 @@ class CliIntegrationTests(unittest.TestCase):
                     "300",
                 ],
                 capture_output=True,
-                text=True,
+                encoding="utf-8", errors="replace",
             )
             self.assertNotEqual(repeated.returncode, 0)
             self.assertIn("--overwrite", repeated.stderr)
+
+
+def _patterned_frame(size=(640, 360)):
+    frame = Image.new("RGB", size, "#224466")
+    draw = ImageDraw.Draw(frame)
+    for step in range(0, size[0], 40):
+        draw.rectangle((step, 0, step + 19, size[1]), fill="#88aa33")
+    draw.ellipse((200, 60, 440, 260), fill="white")
+    return frame
+
+
+class HeroZoomTests(unittest.TestCase):
+    def render_native(self, name, **kwargs):
+        frame = _patterned_frame()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            MODULE, "grab_frame", return_value=frame
+        ):
+            out = Path(tmp) / name
+            MODULE.render_one("unused", [0, 1, 2, 3, 4], out, (3, 4), None,
+                              0.78, 0.96, None, layout="natural",
+                              check_duplicates=False, **kwargs)
+            with Image.open(out) as image:
+                return image.convert("RGB")
+
+    def test_parse_accepts_list_and_boundaries(self):
+        self.assertEqual(MODULE.parse_hero_zoom("1.0, 0.9,0.8"), [1.0, 0.9, 0.8])
+
+    def test_parse_rejects_bad_values_in_chinese(self):
+        for text in ("0.79", "1.01", "abc", "1.0,,0.9", "", "nan"):
+            with self.subTest(text=text), self.assertRaises(SystemExit) as ctx:
+                MODULE.parse_hero_zoom(text)
+            self.assertIn("--hero-zoom", str(ctx.exception))
+
+    def test_zoom_cycles_per_card(self):
+        zooms = [1.0, 0.9, 0.95]
+        picked = [MODULE.hero_zoom_for_card(zooms, i) for i in range(5)]
+        self.assertEqual(picked, [1.0, 0.9, 0.95, 1.0, 0.9])
+        self.assertEqual(MODULE.hero_zoom_for_card(None, 3), 1.0)
+
+    def test_command_render_passes_cycled_zoom(self):
+        seen = []
+
+        def fake_render(video, times, out_path, *rest, **kwargs):
+            seen.append(kwargs["hero_zoom"])
+            Image.new("RGB", (20, 20), "red").save(out_path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "v.mp4").touch()
+            (root / "m.json").write_text(json.dumps({"images": [
+                {"title": f"卡{i}", "times": [1, 2]} for i in range(4)
+            ]}), encoding="utf-8")
+            args = mock.Mock(
+                video=str(root / "v.mp4"), manifest=str(root / "m.json"),
+                out_dir=str(root / "out"), aspect=None, width=None,
+                band_top=0.78, band_bottom=0.96, hero_fraction=None,
+                layout="natural", fit=None, crop_center=None,
+                allow_duplicate_frames=False, overwrite=False,
+                keep_going=False, resume=False, hero_zoom=[1.0, 0.9, 0.95],
+            )
+            with mock.patch.object(MODULE, "video_metadata", return_value=(640, 360, 10)), \
+                    mock.patch.object(MODULE, "render_one", side_effect=fake_render):
+                MODULE.command_render(args)
+        self.assertEqual(seen, [1.0, 0.9, 0.95, 1.0])
+
+    def test_disabled_or_full_zoom_is_pixel_identical(self):
+        base = self.render_native("base.png")
+        full = self.render_native("full.png", hero_zoom=1.0)
+        self.assertEqual(base.tobytes(), full.tobytes())
+
+    def test_native_zoom_keeps_size_and_subtitle_strips(self):
+        base = self.render_native("base.png")
+        zoomed = self.render_native("zoom.png", hero_zoom=0.8)
+        self.assertEqual(zoomed.size, base.size)
+        self.assertNotEqual(zoomed.tobytes(), base.tobytes())
+        # 主图底部的第一条原生字幕条（280–345）与后四条都不得变化。
+        self.assertEqual(
+            zoomed.crop((0, 280, 640, base.height)).tobytes(),
+            base.crop((0, 280, 640, base.height)).tobytes(),
+        )
+
+    def test_native_zoom_in_fixed_layout_keeps_canvas_size(self):
+        frame = _patterned_frame()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            MODULE, "grab_frame", return_value=frame
+        ):
+            out = Path(tmp) / "fixed.png"
+            MODULE.render_one("unused", [0, 1, 2, 3, 4], out, (3, 4), 300,
+                              0.78, 0.96, None, layout="fixed", hero_zoom=0.85)
+            with Image.open(out) as image:
+                self.assertEqual(image.size, (300, 400))
+
+    def test_scripted_zoom_only_changes_hero(self):
+        frame = _patterned_frame((1280, 720))
+        lines = [{"t": index, "text": f"Line {index}"} for index in range(6)]
+
+        def render(**kwargs):
+            with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                MODULE, "grab_frame", return_value=frame
+            ), mock.patch.object(MODULE, "draw_scripted_subtitle"):
+                out = Path(tmp) / "s.png"
+                MODULE.scripted_render_one(
+                    "unused", lines, out, (3, 4), 1080, 0.60, None, None, None,
+                    layout="fixed", six_line_card=True, **kwargs)
+                with Image.open(out) as image:
+                    return image.convert("RGB")
+
+        base, zoomed = render(), render(hero_zoom=0.8)
+        self.assertEqual(zoomed.size, (1080, 1440))
+        hero_h = 1440 - 5 * 114
+        self.assertNotEqual(
+            zoomed.crop((0, 0, 1080, hero_h)).tobytes(),
+            base.crop((0, 0, 1080, hero_h)).tobytes(),
+        )
+        self.assertEqual(
+            zoomed.crop((0, hero_h, 1080, 1440)).tobytes(),
+            base.crop((0, hero_h, 1080, 1440)).tobytes(),
+        )
+
+    def test_cli_rejects_out_of_range_zoom(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "render-script", "v.mp4",
+             "--script", "s.json", "--out", "o.jpg", "--hero-zoom", "0.5"],
+            capture_output=True, encoding="utf-8", errors="replace", check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("0.8", proc.stderr)
+
+
+class KeepGoingResumeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.video = root / "v.mp4"
+        self.video.touch()
+        self.manifest = root / "m.json"
+        self.manifest.write_text(json.dumps({"images": [
+            {"title": "甲", "times": [1, 2]},
+            {"title": "乙", "times": [3, 4]},
+            {"title": "丙", "times": [5, 6]},
+        ]}), encoding="utf-8")
+        self.out_dir = root / "out"
+
+    def run_render(self, fail_titles=(), **flags):
+        args = mock.Mock(
+            video=str(self.video), manifest=str(self.manifest),
+            out_dir=str(self.out_dir), aspect=None, width=None, band_top=0.78,
+            band_bottom=0.96, hero_fraction=None, layout="natural", fit=None,
+            crop_center=None, allow_duplicate_frames=False, overwrite=False,
+            keep_going=False, resume=False, hero_zoom=None,
+        )
+        for key, value in flags.items():
+            setattr(args, key, value)
+        rendered = []
+
+        def fake_render(video, times, out_path, *rest, **kwargs):
+            if Path(out_path).stem.split("_", 1)[1] in fail_titles:
+                raise RuntimeError("抽帧失败")
+            Image.new("RGB", (20, 20), "red").save(out_path)
+            rendered.append(Path(out_path).name)
+
+        with mock.patch.object(MODULE, "video_metadata", return_value=(640, 360, 10)), \
+                mock.patch.object(MODULE, "render_one", side_effect=fake_render):
+            try:
+                MODULE.command_render(args)
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, rendered
+
+    def test_default_failure_still_aborts_batch(self):
+        with self.assertRaises(RuntimeError):
+            self.run_render(fail_titles=("乙",))
+        self.assertFalse((self.out_dir / "渲染失败报告.json").exists())
+
+    def test_keep_going_renders_rest_and_writes_report(self):
+        code, rendered = self.run_render(fail_titles=("乙",), keep_going=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(rendered, ["01_甲.jpg", "03_丙.jpg"])
+        report = json.loads(
+            (self.out_dir / "渲染失败报告.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(report["failures"]), 1)
+        failure = report["failures"][0]
+        self.assertEqual((failure["index"], failure["title"]), (2, "乙"))
+        self.assertEqual(failure["times"], [3.0, 4.0])
+        self.assertIn("抽帧失败", failure["reason"])
+        self.assertFalse((self.out_dir / "final_contact_sheet.jpg").exists())
+
+    def test_resume_only_rerenders_missing_cards_and_clears_report(self):
+        self.run_render(fail_titles=("乙",), keep_going=True)
+        code, rendered = self.run_render(resume=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(rendered, ["02_乙.jpg"])
+        self.assertFalse((self.out_dir / "渲染失败报告.json").exists())
+        self.assertTrue((self.out_dir / "final_contact_sheet.jpg").is_file())
+
+    def test_resume_rerenders_corrupt_output(self):
+        self.run_render()
+        (self.out_dir / "03_丙.jpg").write_bytes(b"broken")
+        code, rendered = self.run_render(resume=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(rendered, ["03_丙.jpg"])
+
+    def test_resume_rerenders_truncated_jpeg(self):
+        self.run_render()
+        card = self.out_dir / "02_乙.jpg"
+        Image.effect_noise((200, 200), 64).convert("RGB").save(card, quality=95)
+        data = card.read_bytes()
+        card.write_bytes(data[: len(data) // 2])
+        self.assertFalse(MODULE.is_valid_image(card))
+        code, rendered = self.run_render(resume=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(rendered, ["02_乙.jpg"])
+
+
+class TmpDirTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(MODULE, "TMP_DIR", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(MODULE.TMP_DIR_ENV, None)
+
+    def run_grab(self, **kwargs):
+        seen = {}
+
+        def fake_ffmpeg(args, context=""):
+            seen["tmp"] = args[-1]
+            Image.new("RGB", (8, 8), "red").save(args[-1], format="PNG")
+
+        with mock.patch.object(MODULE, "ffmpeg", side_effect=fake_ffmpeg):
+            MODULE.grab_frame("video.mp4", 1.0, **kwargs)
+        return seen["tmp"]
+
+    def test_default_uses_system_temp(self):
+        tmp = self.run_grab()
+        self.assertEqual(
+            Path(tmp).parent.resolve(), Path(tempfile.gettempdir()).resolve()
+        )
+        self.assertFalse(os.path.exists(tmp))
+
+    def test_explicit_dir_is_used_and_cleaned(self):
+        with tempfile.TemporaryDirectory() as folder:
+            tmp = self.run_grab(tmp_dir=folder)
+            self.assertEqual(Path(tmp).parent, Path(folder))
+            self.assertEqual(os.listdir(folder), [])
+
+    def test_module_setting_is_used(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(MODULE, "TMP_DIR", folder):
+                tmp = self.run_grab()
+            self.assertEqual(Path(tmp).parent, Path(folder))
+
+    def test_resolve_default_is_none(self):
+        self.assertIsNone(MODULE.resolve_tmp_dir(None))
+
+    def test_resolve_missing_dir(self):
+        with tempfile.TemporaryDirectory() as folder:
+            missing = Path(folder) / "nope"
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.resolve_tmp_dir(str(missing))
+        self.assertIn("不存在", str(ctx.exception))
+
+    def test_resolve_not_a_directory(self):
+        with tempfile.NamedTemporaryFile() as handle:
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.resolve_tmp_dir(handle.name)
+        self.assertIn("不是目录", str(ctx.exception))
+
+    def test_resolve_unwritable_dir(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(MODULE.os, "access", return_value=False):
+                with self.assertRaises(SystemExit) as ctx:
+                    MODULE.resolve_tmp_dir(folder)
+        self.assertIn("不可写", str(ctx.exception))
+
+    def test_env_used_and_flag_wins(self):
+        with tempfile.TemporaryDirectory() as env_dir, \
+                tempfile.TemporaryDirectory() as flag_dir:
+            os.environ[MODULE.TMP_DIR_ENV] = env_dir
+            self.assertEqual(MODULE.resolve_tmp_dir(None), str(Path(env_dir).resolve()))
+            self.assertEqual(
+                MODULE.resolve_tmp_dir(flag_dir), str(Path(flag_dir).resolve())
+            )
+
+    def test_env_invalid_reports_source(self):
+        os.environ[MODULE.TMP_DIR_ENV] = "/definitely/not/here"
+        with self.assertRaises(SystemExit) as ctx:
+            MODULE.resolve_tmp_dir(None)
+        self.assertIn(MODULE.TMP_DIR_ENV, str(ctx.exception))
+
+    def test_mkstemp_failure_is_clear_error(self):
+        with mock.patch.object(
+            MODULE.tempfile, "mkstemp", side_effect=PermissionError(13, "拒绝访问")
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.grab_frame("video.mp4", 1.0)
+        self.assertIn("--tmp-dir", str(ctx.exception))
+
+    def test_cli_rejects_missing_dir_before_rendering(self):
+        with tempfile.TemporaryDirectory() as folder:
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "band", "x.mp4", "-t", "1",
+                 "--tmp-dir", str(Path(folder) / "nope")],
+                capture_output=True, text=True, encoding="utf-8",
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("不存在", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
 
 
 if __name__ == "__main__":

@@ -188,6 +188,12 @@ Agent 会先检查来源、字幕类型和候选帧，确定模式后再生成�
 
 不经过 Agent 也可以直接跑脚本。下面的 `VIDEO` 换成你的视频路径。
 
+**自检来源**：下载后先检查分辨率并解码前 10 秒，坏流或低清在抽帧前就失败（不传 `--min-height` 时低于 720p 只警告）。
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py check-source VIDEO --min-height 720
+```
+
 **挑帧**：生成带时间点的候选帧总览，不用反复试时间点。
 
 ```bash
@@ -219,6 +225,24 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 ```bash
 python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
   --script script.json --out output.jpg --aspect 3:4 --width 1440
+```
+
+**可选六句卡**：`script.json` 中放 6 句已核对、时间点严格递增的台词。此预设在 1080×1440 画布上使用 870px 主画面和下方 5 条各 114px 的连续字幕条，首句与后五句等距；默认脚本布局不变。
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
+  --script script.json --out six-line.jpg --six-line-card --aspect 3:4 --width 1080
+```
+
+`--six-line-card` 仅用于后期绘制的脚本字幕，不接受 `--layout natural` 或 `--hero-fraction`。字幕条默认从源画面高度的 60% 处取样，可用 `--band-center` 调整；仍须逐句核对来源和逐张检查画面。
+
+**固定机位源与 `--hero-zoom`**：优先选多机位、景别有变化的视频；固定机位视频（大师课、网课式录制）是高风险素材，六张主图容易几乎一样。`render` 与 `render-script` 支持可选的 `--hero-zoom 1.0,0.9,0.95`：逗号分隔的每卡主图缩放系数，范围 0.8–1.0，按卡循环，默认不启用且输出不变。它只裁掉更多主图画面再放大，字幕条、文字、条间距和六句卡几何不变，原生模式的裁切窗口不会进入字幕条。因为是裁切后放大，源视频清晰度不足时主图会更模糊，不等于真实清晰度提升。`render-script` 只输出一张图，取第一个系数。
+
+**可选说话人前缀**：问答、对谈类脚本字幕图，可以在 `script.json` 每句加 `"speaker": "主持人"`，再加 `--speaker-prefix on-change`，只在换人时画出「主持人：」这类前缀；`every` 每句都画，`none`（默认）不画。前缀比台词小一号、用强调色，台词字号不会因为前缀而变小。说话人写在 `speaker` 字段里，不写进 `text`。
+
+```bash
+python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
+  --script script.json --out qa.jpg --speaker-prefix on-change
 ```
 
 **保留人物原比例与横屏构图（v2.2.0）**：两种字幕模式都支持 `--layout natural`。不指定宽度时保留源宽度，图片高度按实际内容计算，不强制 3:4；指定 `--width` 也只做等比缩放。
@@ -268,6 +292,8 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 - 原生单行字幕默认从视频高度的 `0.78–0.96` 区域开始预览。
 - 每张图最多 7 个时间点（1 个主画面 + 6 个字幕条），两种模式相同；台词更多时拆成多张图。
 - 默认不覆盖已有图片；确实要替换时加 `--overwrite`。
+- 受限环境下系统临时目录没有写权限时，加 `--tmp-dir <可写目录>`（或设置环境变量 `NSQI_TMP_DIR`，参数优先）指定抽帧临时文件位置；不指定则沿用系统临时目录，目录不存在或不可写会明确报错。
+- 批量 `render` 默认遇到失败就中止；加 `--keep-going` 则单张失败不影响其余，结束时输出失败清单（第几张、时间点、原因）并写入输出目录的 `渲染失败报告.json`，退出码非零。修正后加 `--resume` 只补渲缺失或损坏的图；已有效的图即使 manifest 改了也不会重渲，总览图和时间点文件会重新生成。
 - 出图前会检查重复画面：所有时间点画面几乎相同（例如源视频只是一张静态封面图），或原生模式相邻两条字幕条几乎相同时，直接报错、不出图。确认无误时加 `--allow-duplicate-frames`。
 - 完整参数用 `--help` 查看。
 
@@ -299,6 +325,24 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 - 平台上带中文硬字幕的访谈、播客切片。这类视频常是二次搬运，发布前务必确认使用权。
 
 **还是找不到**：改用脚本字幕模式。用视频自带的字幕轨或 Whisper 文字稿定位时间点，核对台词后写进 `script.json`，再运行 `render-script`。成品会标明是后期字幕，不冒充原字幕。
+
+</details>
+
+<details>
+<summary><strong>访谈、对谈等多人视频要注意什么</strong></summary>
+
+<br>
+
+拼图本身只按时间顺序排列，不识别谁在说话；字幕条只裁画面底部，读者会默认整张图都是主画面里那个人说的。YouTube 字幕轨和普通 Whisper 文字稿也都不标说话人。所以多人视频如果直接按"连续几句"选，就容易把主持人的问题和嘉宾的回答拼在一起，看起来分不清谁说的、顺序也乱。
+
+Skill 现在会这样处理：
+
+- 选句前先给文字稿标上说话人，拿不准的句子回看画面确认，仍确认不了就不用。
+- 默认一张图只放同一个人的话，主画面就是这个人在说话。
+- 想要"一问一答"时先跟你确认，问和答必须在原视频里紧挨着；原生模式没法在画面上补标说话人，交付时会逐句写明；脚本模式可以在画面上标出说话人，见下方 `--speaker-prefix`。
+- YouTube 自动字幕是滚动显示的，同一句会重复出现、时间也偏早，会先去重再定时间点。
+
+调用时可以直接说明："这是两人访谈，只选嘉宾连续说的几句。"
 
 </details>
 
@@ -416,6 +460,8 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 
 每次推送和 Pull Request 都会在 Python 3.10 和 3.13 上通过 GitHub Actions 自动检查。
 
+Windows 等默认编码不是 UTF-8 的系统（如简体中文 Windows 的 GBK），建议先设置 `PYTHONUTF8=1`（PowerShell：`$env:PYTHONUTF8=1`；cmd：`set PYTHONUTF8=1`）再运行上述命令；`check_environment.py` 会在检测到非 UTF-8 默认编码时给出提示。
+
 </details>
 
 **深入文档**
@@ -423,6 +469,7 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 - [URL 获取、yt-dlp、Deno/Node 与文字时间轴](skills/native-subtitle-quote-image/references/yt-dlp-and-transcripts.md)
 - [从读视频、选题到交付的完整工作流](skills/native-subtitle-quote-image/references/end-to-end-workflow.md)
 - [紧凑型主图、字幕条密度与视觉质检](skills/native-subtitle-quote-image/references/visual-style.md)
+- [排错手册：常见报错与出图问题的排查](skills/native-subtitle-quote-image/references/troubleshooting.md)
 
 ## 反馈与贡献
 
