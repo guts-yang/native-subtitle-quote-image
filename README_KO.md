@@ -237,12 +237,16 @@ python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py ren
 
 **고정 카메라 원본과 `--hero-zoom`**: 멀티 카메라이고 화면 크기 변화가 있는 영상을 우선 고르세요. 고정 단일 카메라 영상(강의, 온라인 수업 녹화)은 위험도가 높아 여섯 장의 주 이미지가 거의 같아 보입니다. `render`와 `render-script`는 선택 옵션 `--hero-zoom 1.0,0.9,0.95`를 지원합니다. 카드별 주 이미지 확대 계수를 쉼표로 구분하며 범위는 0.8–1.0, 카드 순서대로 순환하고 기본값은 꺼짐(생략하면 출력 불변)입니다. 주 이미지를 더 많이 잘라낸 뒤 다시 키울 뿐이며 자막 띠, 텍스트, 띠 간격, `--six-line-card` 기하는 바뀌지 않고 원본 모드에서는 잘라내는 영역이 자막 띠로 들어가지 않습니다. 잘라낸 뒤 키우는 방식이므로 원본 해상도가 낮으면 주 이미지가 더 흐려지며 실제 선명도 향상이 아닙니다. `render-script`는 한 장만 만들며 첫 번째 계수를 사용합니다.
 
+**여백 `--strip-gap`과 구분선 `--hero-divider`**: `render`와 `render-script`는 선택 옵션 `--strip-gap N`(자막 띠 사이에 N픽셀 검은 여백 삽입, 0–8, 기본 0)과 `--hero-divider line`(주 이미지와 자막 띠 사이에 2px 얇은 구분선 삽입, 기본 none)을 지원합니다. 배경 픽셀만 추가하며 원본 화면을 덮거나 다시 그리지 않으므로 원본 자막은 여전히 전체 이미지에 대한 단일 균일 축소만 거칩니다. 고정 캔버스의 전체 크기는 유지되고 자막 띠는 조금 낮아지며 `--six-line-card`와는 함께 쓸 수 없습니다.
+
 **선택: 화자 접두어**: 스크립트 모드의 질의응답·대담 이미지에서 `script.json`의 각 문장에 `"speaker": "진행자"`를 넣고 `--speaker-prefix on-change`를 쓰면 화자가 바뀔 때만 `진행자:` 같은 접두어를 그립니다. `every`는 모든 문장에, `none`(기본값)은 그리지 않습니다. 접두어는 문장보다 작고 강조색을 쓰며, 문장이 들어가는 경우 접두어 때문에 문장 글자가 작아지지 않습니다. 화자는 `text`가 아니라 `speaker` 필드에 적습니다.
 
 ```bash
 python3 skills/native-subtitle-quote-image/scripts/native_subtitle_stitch.py render-script VIDEO \
   --script script.json --out qa.jpg --speaker-prefix on-change
 ```
+
+**선택: 핵심 문장 강조**: 스크립트 모드에서 `--emphasize-line last`(마지막 문장) 또는 `--emphasize-line 3`(1부터 세는 3번째 문장)을 쓰면 해당 문장을 따뜻한 색, 굵은 외곽선, 옅은 반투명 배경으로 그립니다. `script.json`의 문장에 `"emphasis": true`를 써도 됩니다. 기본값은 꺼짐(출력 변화 없음)이며 범위를 벗어난 번호는 오류입니다. 스크립트 모드 전용이며 원본 자막 모드는 자막을 다시 그리지 않습니다.
 
 **원본 비율과 가로 구도 유지(v2.2.0)**: 두 모드 모두 `--layout natural`을 지원합니다. `--width`를 생략하면 원본 너비를 유지하며 높이는 실제 내용에 따라 결정됩니다. 너비를 지정해도 같은 비율로 확대·축소합니다.
 
