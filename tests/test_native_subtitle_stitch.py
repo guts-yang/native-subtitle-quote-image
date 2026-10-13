@@ -374,6 +374,71 @@ class NaturalGeometryTests(unittest.TestCase):
                 self.assertNotIn("Traceback", proc.stderr)
 
 
+class BreathingGapTests(unittest.TestCase):
+    def render_native(self, **options):
+        frame = Image.new("RGB", (640, 360), "#336699")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            MODULE, "grab_frame", return_value=frame
+        ):
+            out = Path(tmp) / "native.jpg"
+            MODULE.render_one("unused", [0, 1, 2, 3, 4], out, (3, 4), None,
+                              0.78, 0.96, None, layout="natural", **options)
+            with Image.open(out) as rendered:
+                return rendered.convert("RGB")
+
+    def test_native_defaults_unchanged(self):
+        self.assertEqual(self.render_native().size, (640, 605))
+
+    def test_native_gap_and_divider_insert_background_rows(self):
+        rendered = self.render_native(strip_gap=4, hero_divider="line")
+        # 四条字幕条之间 3 个缝隙 + 1 条 2px 分隔线。
+        self.assertEqual(rendered.size, (640, 605 + 3 * 4 + 2))
+        self.assertEqual(rendered.getpixel((320, 345 + 1)), (96, 96, 96))
+        self.assertLess(max(rendered.getpixel((320, 345 + 2 + 65 + 1))), 8)
+
+    def test_stack_parts_keeps_part_pixels_and_fills_gaps_with_background(self):
+        parts = [Image.new("RGB", (20, 10), color) for color in ("red", "green", "blue")]
+        stacked = MODULE.stack_parts(parts, MODULE.layout_gaps(2, 3, "line"))
+        self.assertEqual(stacked.size, (20, 30 + 2 + 3))
+        self.assertEqual(stacked.getpixel((5, 5)), (255, 0, 0))
+        self.assertEqual(stacked.getpixel((5, 10)), MODULE.DIVIDER_COLOR)
+        self.assertEqual(stacked.getpixel((5, 12 + 5)), (0, 128, 0))
+        self.assertEqual(stacked.getpixel((5, 22 + 1)), (0, 0, 0))
+        self.assertEqual(stacked.getpixel((5, 25 + 5)), (0, 0, 255))
+
+    def test_scripted_fixed_gap_keeps_canvas_size(self):
+        frame = Image.new("RGB", (1280, 720), "#336699")
+        lines = [{"t": i, "text": f"Line {i}"} for i in range(5)]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            MODULE, "grab_frame", return_value=frame
+        ), mock.patch.object(MODULE, "draw_scripted_subtitle"):
+            out = Path(tmp) / "script.jpg"
+            MODULE.scripted_render_one("unused", lines, out, (3, 4), 600,
+                                       0.88, None, None, None,
+                                       strip_gap=4, hero_divider="line")
+            with Image.open(out) as rendered:
+                self.assertEqual(rendered.size, (600, 800))
+
+    def test_cli_rejects_invalid_gap_options_before_io(self):
+        for command, options, message in [
+            ("render", ["--strip-gap", "9"], "--strip-gap"),
+            ("render", ["--strip-gap", "-1"], "--strip-gap"),
+            ("render-script", ["--six-line-card", "--strip-gap", "2"], "固定几何"),
+            ("render-script", ["--six-line-card", "--hero-divider", "line"], "固定几何"),
+        ]:
+            with self.subTest(options=options):
+                extra = (["--manifest", "unused.json", "--out-dir", "unused"]
+                         if command == "render"
+                         else ["--script", "unused.json", "--out", "unused.jpg"])
+                proc = subprocess.run(
+                    [sys.executable, str(SCRIPT), command, "unused.mp4", *extra, *options],
+                    capture_output=True, encoding="utf-8", errors="replace",
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(message, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+
+
 class SixLineCardTests(unittest.TestCase):
     def test_geometry_and_rendered_strips(self):
         self.assertEqual(MODULE.six_line_geometry(1080, 1440), (870, 114, 870 / 1440))
@@ -434,7 +499,7 @@ class SixLineCardTests(unittest.TestCase):
             ]}), encoding="utf-8")
             args = mock.Mock(
                 video=str(video), script=str(script), six_line_card=True,
-                speaker_prefix="none",
+                speaker_prefix="none", emphasize_line=None,
             )
             with mock.patch.object(MODULE, "video_metadata", return_value=(1080, 870, 10)):
                 with self.assertRaisesRegex(SystemExit, "恰好 6 句"):
@@ -558,6 +623,100 @@ class SpeakerPrefixTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(min(lit), 0)
         self.assertLessEqual(max(lit) - min(lit), 552)
+
+
+class EmphasisTests(unittest.TestCase):
+    def lit(self, image, color):
+        return [
+            (x, y) for x in range(image.width) for y in range(image.height)
+            if image.getpixel((x, y)) == color
+        ]
+
+    def test_default_output_is_unchanged(self):
+        a = Image.new("RGB", (900, 120), "#404040")
+        b = a.copy()
+        MODULE.draw_scripted_subtitle(a, "Hello world", 60, None, 48, 820)
+        MODULE.draw_scripted_subtitle(b, "Hello world", 60, None, 48, 820, emphasis=False)
+        self.assertEqual(a.tobytes(), b.tobytes())
+        self.assertFalse(self.lit(a, MODULE.EMPHASIS_FILL))
+
+    def test_emphasis_uses_warm_fill_and_backing_plate(self):
+        image = Image.new("RGB", (900, 120), "#808080")
+        MODULE.draw_scripted_subtitle(
+            image, "Hello world", 60, None, 48, 820, emphasis=True
+        )
+        self.assertTrue(self.lit(image, MODULE.EMPHASIS_FILL))
+        self.assertFalse(self.lit(image, (255, 255, 255)))
+        # 底衬把文字周围的灰底按固定透明度压暗，成片出现同一个压暗色。
+        alpha = MODULE.EMPHASIS_PLATE_ALPHA
+        plate = round(128 * (255 - alpha) / 255)
+        self.assertGreater(len(self.lit(image, (plate,) * 3)), 1000)
+
+    def test_emphasis_plate_does_not_dim_speaker_prefix(self):
+        image = Image.new("RGB", (900, 120), "#808080")
+        MODULE.draw_scripted_subtitle(
+            image, "Hello world", 60, None, 48, 820, speaker="Host", emphasis=True
+        )
+        # 前缀画在底衬之上，仍保持原本的强调色。
+        self.assertTrue(self.lit(image, MODULE.SPEAKER_PREFIX_FILL))
+        self.assertTrue(self.lit(image, MODULE.EMPHASIS_FILL))
+
+    def test_apply_emphasis_targets(self):
+        lines = [{"t": i, "text": str(i)} for i in range(4)]
+        MODULE.apply_emphasis(lines, None)
+        self.assertFalse(any("emphasis" in line for line in lines))
+        MODULE.apply_emphasis(lines, "last")
+        self.assertEqual([line.get("emphasis") for line in lines], [None, None, None, True])
+        lines = [{"t": i, "text": str(i)} for i in range(4)]
+        MODULE.apply_emphasis(lines, 2)
+        self.assertEqual([line.get("emphasis") for line in lines], [None, True, None, None])
+
+    def test_out_of_range_line_is_rejected(self):
+        lines = [{"t": i, "text": str(i)} for i in range(3)]
+        for bad in (4, 99):
+            with self.assertRaisesRegex(SystemExit, "超出范围"):
+                MODULE.apply_emphasis(lines, bad)
+
+    def test_json_emphasis_must_be_boolean(self):
+        data = {"lines": [{"t": 1, "text": "a", "emphasis": True}, {"t": 2, "text": "b"}]}
+        lines = MODULE.normalize_script_lines(data, 10)
+        self.assertTrue(lines[0]["emphasis"])
+        data["lines"][1]["emphasis"] = "yes"
+        with self.assertRaisesRegex(SystemExit, "emphasis 必须是"):
+            MODULE.normalize_script_lines(data, 10)
+
+    def test_six_line_card_passes_emphasis_only_to_target(self):
+        frames = [Image.new("RGB", (1080, 870), "#303030") for _ in range(6)]
+        lines = [{"t": i, "text": f"Line {i}"} for i in range(6)]
+        MODULE.apply_emphasis(lines, "last")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            MODULE, "grab_frame", side_effect=frames
+        ), mock.patch.object(MODULE, "draw_scripted_subtitle") as draw_text:
+            MODULE.scripted_render_one(
+                "unused", lines, Path(tmp) / "o.jpg", (3, 4), 1080, 0.60, None,
+                None, None, six_line_card=True,
+            )
+        flags = [call.kwargs["emphasis"] for call in draw_text.call_args_list]
+        self.assertEqual(flags, [False] * 5 + [True])
+
+    def test_cli_rejects_bad_value_before_video_io(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "render-script", "unused.mp4",
+             "--script", "unused.json", "--out", "unused.jpg",
+             "--emphasize-line", "0"],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_native_render_has_no_emphasis_option(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "render", "unused.mp4",
+             "--manifest", "m.json", "--out-dir", "o", "--emphasize-line", "last"],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unrecognized arguments", proc.stderr)
 
 
 class SideCropTests(unittest.TestCase):
