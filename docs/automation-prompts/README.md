@@ -6,6 +6,7 @@
 |---|---|---|
 | [ted-daily-prompt.md](ted-daily-prompt.md) | 每日 TED 频道优质演讲 → 字幕金句长图 + 小红书文案 | 3 组金句长图 + 1 篇文案 |
 | [celebrity-speeches-podcast-daily-prompt.md](celebrity-speeches-podcast-daily-prompt.md) | 每日 AI 领域名人演讲/播客检索筛选 → 字幕金句长图 + 小红书文案 | 3 组金句长图 + 1 篇文案（纯音频降级为文字要点） |
+| [xiaohongshu-comment-suggestions-daily-prompt.md](xiaohongshu-comment-suggestions-daily-prompt.md) | 每日检索小红书科技/知识类创作者近期笔记并生成评论建议 | 最多 5 条帖子 + 每帖 2 条评论草稿（仅建议，不自动发布） |
 
 ## 使用方式
 
